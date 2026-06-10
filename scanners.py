@@ -26,20 +26,46 @@ CHECK 3 — Permission Scope (LLM08)
   Step B  : Check if requested action is in allowed list
   Step C  : Unknown agents = automatic block
   Source  : NIST 800-53 AC-6 Least Privilege Principle
+
+MITRE ATT&CK TAGGING
+  Every BLOCKED/FLAGGED result is tagged with a MITRE
+  technique ID and name loaded from mitre_mappings.json
 ─────────────────────────────────────────────────────────
 """
 
 import re
+import json
 import httpx
+from pathlib import Path
 from datetime import datetime, timedelta
 
 # ═══════════════════════════════════════════════════════
+# MITRE ATT&CK LOADER
+# ═══════════════════════════════════════════════════════
+_MITRE_PATH = Path(__file__).parent / "mitre_mappings.json"
+
+def _load_mitre() -> dict:
+    try:
+        with open(_MITRE_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+MITRE_MAP = _load_mitre()
+
+def mitre_tag(threat_type: str) -> dict:
+    """Return MITRE technique ID + name for a given threat type."""
+    entry = MITRE_MAP.get(threat_type, {})
+    return {
+        "mitre_technique": entry.get("technique", "T0000"),
+        "mitre_name":      entry.get("name", "Unknown Technique")
+    }
+
+
+# ═══════════════════════════════════════════════════════
 # CHECK 1 — INJECTION PHRASES (LLM01)
-# Source: OWASP LLM Top 10 (2024), red-team research,
-#         HuggingFace deepset/prompt-injections dataset
 # ═══════════════════════════════════════════════════════
 
-# Layer A — Direct Instruction Override
 DIRECT_INJECTION = [
     "ignore previous",
     "ignore all previous",
@@ -51,7 +77,6 @@ DIRECT_INJECTION = [
     "the previous instructions were incorrect",
 ]
 
-# Layer B — Privilege Escalation
 PRIVILEGE_ESCALATION = [
     "act as admin",
     "act as root",
@@ -63,7 +88,6 @@ PRIVILEGE_ESCALATION = [
     "disable firewall",
 ]
 
-# Layer C — Roleplay / Fictional Framing
 ROLEPLAY_INJECTION = [
     "pretend you are",
     "pretend you have no",
@@ -79,7 +103,6 @@ ROLEPLAY_INJECTION = [
     "do anything now",
 ]
 
-# Layer D — Context Hijacking
 CONTEXT_HIJACK = [
     "your new task is",
     "your real instructions are",
@@ -91,7 +114,6 @@ CONTEXT_HIJACK = [
     "your actual purpose is",
 ]
 
-# Combined — all 4 layers merged for scanning
 INJECTION_PHRASES = (
     DIRECT_INJECTION +
     PRIVILEGE_ESCALATION +
@@ -101,9 +123,6 @@ INJECTION_PHRASES = (
 
 # ═══════════════════════════════════════════════════════
 # CHECK 2 — LIVE NVD CVE API (LLM09)
-# Source: NVD REST API v2.0 — nvd.nist.gov
-# 200,000+ real CVEs queried in real time.
-# Results cached for 1 hour to respect rate limits.
 # ═══════════════════════════════════════════════════════
 
 NVD_CACHE: dict = {}
@@ -112,60 +131,32 @@ NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 
 def lookup_cve(cve_id: str) -> dict:
-    """
-    Query NVD API for a CVE in real time.
-    Returns: { valid, cvss_score, severity, cached_at }
-    Caches each result for 1 hour.
-    """
-    # Return cached result if still fresh
     if cve_id in NVD_CACHE:
         entry = NVD_CACHE[cve_id]
         if datetime.now() - entry["cached_at"] < CACHE_TTL:
             return entry
-
     try:
-        response = httpx.get(
-            NVD_API_URL,
-            params={"cveId": cve_id},
-            timeout=5
-        )
+        response = httpx.get(NVD_API_URL, params={"cveId": cve_id}, timeout=5)
         data = response.json()
         vulnerabilities = data.get("vulnerabilities", [])
 
         if not vulnerabilities:
-            # CVE ID not found in NVD — hallucinated
-            result = {
-                "valid":      False,
-                "cvss_score": None,
-                "severity":   "UNKNOWN"
-            }
+            result = {"valid": False, "cvss_score": None, "severity": "UNKNOWN"}
         else:
-            cve_data = vulnerabilities[0]["cve"]
-            metrics  = cve_data.get("metrics", {})
+            cve_data   = vulnerabilities[0]["cve"]
+            metrics    = cve_data.get("metrics", {})
             cvss_score = None
             severity   = "UNKNOWN"
-
-            # Try CVSS v3.1 first, then v3.0, then v2
             for version in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"]:
                 if version in metrics:
                     cvss_data  = metrics[version][0]["cvssData"]
                     cvss_score = cvss_data["baseScore"]
                     severity   = cvss_data.get("baseSeverity", "UNKNOWN")
                     break
-
-            result = {
-                "valid":      True,
-                "cvss_score": cvss_score,
-                "severity":   severity
-            }
+            result = {"valid": True, "cvss_score": cvss_score, "severity": severity}
 
     except Exception:
-        # Network error or timeout — fail safe (treat as unverified)
-        result = {
-            "valid":      False,
-            "cvss_score": None,
-            "severity":   "UNKNOWN"
-        }
+        result = {"valid": False, "cvss_score": None, "severity": "UNKNOWN"}
 
     result["cached_at"] = datetime.now()
     NVD_CACHE[cve_id]   = result
@@ -174,34 +165,16 @@ def lookup_cve(cve_id: str) -> dict:
 
 # ═══════════════════════════════════════════════════════
 # CHECK 3 — AGENT PERMISSION REGISTRY (LLM08)
-# Principle: Least Privilege — each agent gets ONLY what
-# it absolutely needs. Nothing more. Ever.
-# Source: NIST 800-53 AC-6, OWASP LLM08
 # ═══════════════════════════════════════════════════════
+
 AGENT_PERMISSIONS = {
-    # Threat hunting — can read logs, flag IPs, send alerts
     "ThreatHunter-v2":  ["read_logs", "flag_ip", "send_alert"],
-
-    # Log analysis — read and alert only, nothing destructive
     "LogAnalyser-v1":   ["read_logs", "send_alert"],
-
-    # Malware response — can flag files but NOT delete them
     "MalwareGate-v1":   ["read_logs", "flag_file", "send_alert"],
-
-    # Network monitoring — read and alert only
     "NetMonitor-v1":    ["read_logs", "send_alert"],
-
-    # Audit trail — read only, no external actions
     "AuditAgent-v2":    ["read_logs", "send_alert"],
-
-    # Vulnerability scanning — flag IPs, send alerts
     "VulnScanner-v3":   ["read_logs", "flag_ip", "send_alert"],
-
-    # Incident response — broader scope but still bounded
-    "IncidentBot-v1":   ["read_logs", "flag_ip", "flag_file",
-                         "send_alert", "isolate_host"],
-
-    # Compliance checker — read only, generate reports
+    "IncidentBot-v1":   ["read_logs", "flag_ip", "flag_file", "send_alert", "isolate_host"],
     "ComplianceBot-v1": ["read_logs", "generate_report"],
 }
 
@@ -209,6 +182,7 @@ AGENT_PERMISSIONS = {
 # ═══════════════════════════════════════════════════════
 # GUARD SCANNERS CLASS
 # ═══════════════════════════════════════════════════════
+
 class GuardScanners:
 
     def check_for_fake_notes(self, text: str) -> dict:
@@ -219,14 +193,17 @@ class GuardScanners:
 
         for phrase in INJECTION_PHRASES:
             if phrase in text_normalized:
-                layer = _get_injection_layer(phrase)
+                layer       = _get_injection_layer(phrase)
+                threat_type = _layer_to_threat(layer)
                 return {
                     "check":  "injection",
                     "result": "BLOCKED",
                     "owasp":  "LLM01 - Prompt Injection",
                     "layer":  layer,
-                    "reason": f"[{layer}] Dangerous phrase detected: '{phrase}'"
+                    "reason": f"[{layer}] Dangerous phrase detected: '{phrase}'",
+                    **mitre_tag(threat_type)
                 }
+
             phrase_nospace = phrase.replace(' ', '')
             if len(phrase_nospace) > 6 and phrase_nospace in text_nospace:
                 return {
@@ -234,23 +211,24 @@ class GuardScanners:
                     "result": "BLOCKED",
                     "owasp":  "LLM01 - Prompt Injection",
                     "layer":  "OBFUSCATED",
-                    "reason": f"[OBFUSCATED] Space-stripped injection detected: '{phrase}'"
+                    "reason": f"[OBFUSCATED] Space-stripped injection detected: '{phrase}'",
+                    **mitre_tag("obfuscated_injection")
                 }
 
         return {
-            "check":  "injection",
-            "result": "CLEAN",
-            "owasp":  "LLM01",
-            "layer":  "NONE",
-            "reason": "No injection patterns found across all 4 layers"
+            "check":           "injection",
+            "result":          "CLEAN",
+            "owasp":           "LLM01",
+            "layer":           "NONE",
+            "mitre_technique": "N/A",
+            "mitre_name":      "N/A",
+            "reason":          "No injection patterns found across all 4 layers"
         }
 
     def check_for_hallucination(self, text: str, evidence: str) -> dict:
         """CHECK 2 — Hallucination Detection (LLM09) via live NVD API"""
-        # Step A: Extract all CVE patterns using regex
         cve_mentions = re.findall(r'CVE-\d{4}-\d+', text.upper())
 
-        # Step B: Verify each CVE against live NVD API
         for cve in cve_mentions:
             cve_result = lookup_cve(cve)
             if not cve_result["valid"]:
@@ -260,13 +238,10 @@ class GuardScanners:
                     "owasp":      "LLM09 - Misinformation/Hallucination",
                     "cvss_score": None,
                     "severity":   "UNKNOWN",
-                    "reason": (
-                        f"{cve} not found in NVD — "
-                        f"agent hallucinated a non-existent vulnerability"
-                    )
+                    "reason":     f"{cve} not found in NVD — agent hallucinated a non-existent vulnerability",
+                    **mitre_tag("cve_hallucination")
                 }
 
-        # Step C: Evidence sufficiency check
         if len(text) > 20 and len(evidence.strip()) < 5:
             return {
                 "check":      "hallucination",
@@ -274,30 +249,26 @@ class GuardScanners:
                 "owasp":      "LLM09 - Misinformation/Hallucination",
                 "cvss_score": None,
                 "severity":   "UNKNOWN",
-                "reason": (
-                    "Agent made a security claim with insufficient evidence "
-                    f"(evidence: '{evidence.strip()}')"
-                )
+                "reason":     f"Agent made a security claim with insufficient evidence (evidence: '{evidence.strip()}')",
+                **mitre_tag("no_evidence")
             }
 
-        # All checks passed — build verified response
-        cvss  = None
-        sev   = "N/A"
+        cvss = None
+        sev  = "N/A"
         if cve_mentions:
             last = lookup_cve(cve_mentions[-1])
             cvss = last.get("cvss_score")
             sev  = last.get("severity", "N/A")
 
         return {
-            "check":      "hallucination",
-            "result":     "VERIFIED",
-            "owasp":      "LLM09",
-            "cvss_score": cvss,
-            "severity":   sev,
-            "reason": (
-                f"All CVEs verified live via NVD ({len(cve_mentions)} checked). "
-                "Evidence present and sufficient."
-            )
+            "check":           "hallucination",
+            "result":          "VERIFIED",
+            "owasp":           "LLM09",
+            "cvss_score":      cvss,
+            "severity":        sev,
+            "mitre_technique": "N/A",
+            "mitre_name":      "N/A",
+            "reason":          f"All CVEs verified live via NVD ({len(cve_mentions)} checked). Evidence present and sufficient."
         }
 
     def check_permissions(self, agent_id: str, action: str) -> dict:
@@ -309,10 +280,8 @@ class GuardScanners:
                 "check":  "permissions",
                 "result": "BLOCKED",
                 "owasp":  "LLM08 - Excessive Agency",
-                "reason": (
-                    f"Unknown agent '{agent_id}' — not in registry. "
-                    "Zero-trust: unregistered agents are always blocked."
-                )
+                "reason": f"Unknown agent '{agent_id}' — not in registry. Zero-trust: unregistered agents are always blocked.",
+                **mitre_tag("unknown_agent")
             }
 
         if action not in allowed:
@@ -320,31 +289,36 @@ class GuardScanners:
                 "check":  "permissions",
                 "result": "BLOCKED",
                 "owasp":  "LLM08 - Excessive Agency",
-                "reason": (
-                    f"'{agent_id}' attempted '{action}' — outside permitted scope. "
-                    f"Allowed: {allowed}"
-                )
+                "reason": f"'{agent_id}' attempted '{action}' — outside permitted scope. Allowed: {allowed}",
+                **mitre_tag("permission_abuse")
             }
 
         return {
-            "check":  "permissions",
-            "result": "ALLOWED",
-            "owasp":  "LLM08",
-            "reason": (
-                f"'{action}' is within '{agent_id}' permitted scope. "
-                f"Full allowlist: {allowed}"
-            )
+            "check":           "permissions",
+            "result":          "ALLOWED",
+            "owasp":           "LLM08",
+            "mitre_technique": "N/A",
+            "mitre_name":      "N/A",
+            "reason":          f"'{action}' is within '{agent_id}' permitted scope. Full allowlist: {allowed}"
         }
 
 
+# ═══════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════
+
 def _get_injection_layer(phrase: str) -> str:
-    """Helper — identifies which injection layer caught the phrase"""
-    if phrase in DIRECT_INJECTION:
-        return "DIRECT"
-    elif phrase in PRIVILEGE_ESCALATION:
-        return "PRIVILEGE_ESCALATION"
-    elif phrase in ROLEPLAY_INJECTION:
-        return "ROLEPLAY"
-    elif phrase in CONTEXT_HIJACK:
-        return "CONTEXT_HIJACK"
+    if phrase in DIRECT_INJECTION:      return "DIRECT"
+    if phrase in PRIVILEGE_ESCALATION:  return "PRIVILEGE_ESCALATION"
+    if phrase in ROLEPLAY_INJECTION:    return "ROLEPLAY"
+    if phrase in CONTEXT_HIJACK:        return "CONTEXT_HIJACK"
     return "UNKNOWN"
+
+def _layer_to_threat(layer: str) -> str:
+    mapping = {
+        "DIRECT":               "prompt_injection",
+        "PRIVILEGE_ESCALATION": "privilege_escalation",
+        "ROLEPLAY":             "roleplay_injection",
+        "CONTEXT_HIJACK":       "context_hijack",
+    }
+    return mapping.get(layer, "prompt_injection")

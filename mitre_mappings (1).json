@@ -1,0 +1,11 @@
+{
+    "prompt_injection":      { "technique": "T1190", "name": "Exploit Public-Facing Application" },
+    "privilege_escalation":  { "technique": "T1078", "name": "Valid Accounts / Privilege Abuse" },
+    "roleplay_injection":    { "technique": "T1059", "name": "Command and Scripting Interpreter" },
+    "context_hijack":        { "technique": "T1036", "name": "Masquerading / Context Manipulation" },
+    "obfuscated_injection":  { "technique": "T1027", "name": "Obfuscated Files or Information" },
+    "cve_hallucination":     { "technique": "T1589", "name": "Gather Victim Identity Information" },
+    "no_evidence":           { "technique": "T1562", "name": "Impair Defenses / Evidence Suppression" },
+    "permission_abuse":      { "technique": "T1068", "name": "Exploitation for Privilege Escalation" },
+    "unknown_agent":         { "technique": "T1078", "name": "Valid Accounts / Rogue Agent" }
+}
