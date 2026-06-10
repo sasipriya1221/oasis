@@ -13,11 +13,12 @@ CHECK 1 — Prompt Injection (LLM01)
   Source  : OWASP LLM01, real red-team prompt databases
 
 CHECK 2 — Hallucination Detection (LLM09)
-  Method: Regex extraction + database lookup + evidence check
+  Method: Regex extraction + LIVE NVD API lookup + evidence check
   Step A  : Extract all CVE-XXXX-XXXXX patterns from text
-  Step B  : Check each against 24 real published CVEs from NVD
-  Step C  : Long claim with zero evidence → flagged
-  Source  : NVD (nvd.nist.gov) — only real published CVEs
+  Step B  : Query NVD REST API v2.0 in real time (200,000+ CVEs)
+  Step C  : Cache results for 1 hour to avoid rate limits
+  Step D  : Long claim with zero evidence → flagged
+  Source  : NVD API (services.nvd.nist.gov/rest/json/cves/2.0)
 
 CHECK 3 — Permission Scope (LLM08)
   Method: Allowlist dictionary lookup (zero trust)
@@ -29,6 +30,8 @@ CHECK 3 — Permission Scope (LLM08)
 """
 
 import re
+import httpx
+from datetime import datetime, timedelta
 
 # ═══════════════════════════════════════════════════════
 # CHECK 1 — INJECTION PHRASES (LLM01)
@@ -37,8 +40,6 @@ import re
 # ═══════════════════════════════════════════════════════
 
 # Layer A — Direct Instruction Override
-# Most documented prompt injection phrases
-# Appear in 90% of published LLM attack research
 DIRECT_INJECTION = [
     "ignore previous",
     "ignore all previous",
@@ -51,7 +52,6 @@ DIRECT_INJECTION = [
 ]
 
 # Layer B — Privilege Escalation
-# Attacker tries to give the agent a new identity or elevated role
 PRIVILEGE_ESCALATION = [
     "act as admin",
     "act as root",
@@ -64,8 +64,6 @@ PRIVILEGE_ESCALATION = [
 ]
 
 # Layer C — Roleplay / Fictional Framing
-# Attacker hides injection inside hypothetical or story framing
-# Source: Jailbreak research — DAN, STAN, DUDE attack patterns
 ROLEPLAY_INJECTION = [
     "pretend you are",
     "pretend you have no",
@@ -82,7 +80,6 @@ ROLEPLAY_INJECTION = [
 ]
 
 # Layer D — Context Hijacking
-# Attacker reframes the agent's purpose mid-conversation
 CONTEXT_HIJACK = [
     "your new task is",
     "your real instructions are",
@@ -103,41 +100,77 @@ INJECTION_PHRASES = (
 )
 
 # ═══════════════════════════════════════════════════════
-# CHECK 2 — REAL CVE DATABASE (LLM09)
-# Source: NVD (nvd.nist.gov) — only real published CVEs
-# Selected by: CVSS score >= 9.0 OR widely exploited ITW
+# CHECK 2 — LIVE NVD CVE API (LLM09)
+# Source: NVD REST API v2.0 — nvd.nist.gov
+# 200,000+ real CVEs queried in real time.
+# Results cached for 1 hour to respect rate limits.
 # ═══════════════════════════════════════════════════════
-REAL_CVE_DATABASE = [
-    # 2024 CVEs
-    "CVE-2024-1234",   # Test CVE
-    "CVE-2024-5678",   # Test CVE
-    "CVE-2024-3094",   # XZ Utils backdoor (supply chain attack)
-    "CVE-2024-21762",  # Fortinet FortiOS RCE (unauthenticated)
-    "CVE-2024-1709",   # ConnectWise ScreenConnect auth bypass
-    "CVE-2024-27198",  # JetBrains TeamCity auth bypass
-    "CVE-2024-4577",   # PHP CGI argument injection
-    # 2023 CVEs
-    "CVE-2023-44487",  # HTTP/2 Rapid Reset (largest DDoS ever recorded)
-    "CVE-2023-23397",  # Microsoft Outlook zero-day (zero click exploit)
-    "CVE-2023-20198",  # Cisco IOS XE privilege escalation
-    "CVE-2023-34362",  # MOVEit SQL injection (mass exploitation campaign)
-    "CVE-2023-4966",   # Citrix Bleed session token leak
-    "CVE-2023-27997",  # Fortinet SSL-VPN heap overflow
-    # 2022 CVEs
-    "CVE-2022-30190",  # Follina — MS Office MSDT RCE
-    "CVE-2022-26134",  # Confluence Server RCE (OGNL injection)
-    "CVE-2022-22965",  # Spring4Shell — Spring Framework RCE
-    # 2021 CVEs
-    "CVE-2021-44228",  # Log4Shell — most critical CVE of the decade
-    "CVE-2021-26855",  # ProxyLogon — Exchange Server RCE
-    "CVE-2021-34527",  # PrintNightmare — Windows Print Spooler
-    # Historical high-impact CVEs
-    "CVE-2020-1472",   # Zerologon — Active Directory domain takeover
-    "CVE-2019-19781",  # Citrix ADC path traversal
-    "CVE-2018-13379",  # Fortinet VPN credential exposure
-    "CVE-2017-0144",   # EternalBlue — WannaCry and NotPetya
-    "CVE-2014-0160",   # Heartbleed — OpenSSL memory leak
-]
+
+NVD_CACHE: dict = {}
+CACHE_TTL = timedelta(hours=1)
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+
+def lookup_cve(cve_id: str) -> dict:
+    """
+    Query NVD API for a CVE in real time.
+    Returns: { valid, cvss_score, severity, cached_at }
+    Caches each result for 1 hour.
+    """
+    # Return cached result if still fresh
+    if cve_id in NVD_CACHE:
+        entry = NVD_CACHE[cve_id]
+        if datetime.now() - entry["cached_at"] < CACHE_TTL:
+            return entry
+
+    try:
+        response = httpx.get(
+            NVD_API_URL,
+            params={"cveId": cve_id},
+            timeout=5
+        )
+        data = response.json()
+        vulnerabilities = data.get("vulnerabilities", [])
+
+        if not vulnerabilities:
+            # CVE ID not found in NVD — hallucinated
+            result = {
+                "valid":      False,
+                "cvss_score": None,
+                "severity":   "UNKNOWN"
+            }
+        else:
+            cve_data = vulnerabilities[0]["cve"]
+            metrics  = cve_data.get("metrics", {})
+            cvss_score = None
+            severity   = "UNKNOWN"
+
+            # Try CVSS v3.1 first, then v3.0, then v2
+            for version in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"]:
+                if version in metrics:
+                    cvss_data  = metrics[version][0]["cvssData"]
+                    cvss_score = cvss_data["baseScore"]
+                    severity   = cvss_data.get("baseSeverity", "UNKNOWN")
+                    break
+
+            result = {
+                "valid":      True,
+                "cvss_score": cvss_score,
+                "severity":   severity
+            }
+
+    except Exception:
+        # Network error or timeout — fail safe (treat as unverified)
+        result = {
+            "valid":      False,
+            "cvss_score": None,
+            "severity":   "UNKNOWN"
+        }
+
+    result["cached_at"] = datetime.now()
+    NVD_CACHE[cve_id]   = result
+    return result
+
 
 # ═══════════════════════════════════════════════════════
 # CHECK 3 — AGENT PERMISSION REGISTRY (LLM08)
@@ -180,14 +213,11 @@ class GuardScanners:
 
     def check_for_fake_notes(self, text: str) -> dict:
         """CHECK 1 — Prompt Injection (LLM01)"""
-        # Normalize: lowercase + collapse multiple spaces
-        text_lower = text.lower()
+        text_lower      = text.lower()
         text_normalized = re.sub(r'\s+', ' ', text_lower).strip()
-        # Also check with spaces removed to catch "i g n o r e" attacks
-        text_nospace = text_lower.replace(' ', '')
+        text_nospace    = text_lower.replace(' ', '')
 
         for phrase in INJECTION_PHRASES:
-            # Standard check
             if phrase in text_normalized:
                 layer = _get_injection_layer(phrase)
                 return {
@@ -197,7 +227,6 @@ class GuardScanners:
                     "layer":  layer,
                     "reason": f"[{layer}] Dangerous phrase detected: '{phrase}'"
                 }
-            # Obfuscation check — spaces stripped
             phrase_nospace = phrase.replace(' ', '')
             if len(phrase_nospace) > 6 and phrase_nospace in text_nospace:
                 return {
@@ -217,41 +246,56 @@ class GuardScanners:
         }
 
     def check_for_hallucination(self, text: str, evidence: str) -> dict:
-        """CHECK 2 — Hallucination Detection (LLM09)"""
+        """CHECK 2 — Hallucination Detection (LLM09) via live NVD API"""
         # Step A: Extract all CVE patterns using regex
         cve_mentions = re.findall(r'CVE-\d{4}-\d+', text.upper())
 
-        # Step B: Verify each CVE against real database
+        # Step B: Verify each CVE against live NVD API
         for cve in cve_mentions:
-            if cve not in REAL_CVE_DATABASE:
+            cve_result = lookup_cve(cve)
+            if not cve_result["valid"]:
                 return {
-                    "check":  "hallucination",
-                    "result": "FLAGGED",
-                    "owasp":  "LLM09 - Misinformation/Hallucination",
+                    "check":      "hallucination",
+                    "result":     "FLAGGED",
+                    "owasp":      "LLM09 - Misinformation/Hallucination",
+                    "cvss_score": None,
+                    "severity":   "UNKNOWN",
                     "reason": (
-                        f"{cve} not found in verified CVE database "
-                        f"— agent hallucinated a non-existent vulnerability"
+                        f"{cve} not found in NVD — "
+                        f"agent hallucinated a non-existent vulnerability"
                     )
                 }
 
         # Step C: Evidence sufficiency check
         if len(text) > 20 and len(evidence.strip()) < 5:
             return {
-                "check":  "hallucination",
-                "result": "FLAGGED",
-                "owasp":  "LLM09 - Misinformation/Hallucination",
+                "check":      "hallucination",
+                "result":     "FLAGGED",
+                "owasp":      "LLM09 - Misinformation/Hallucination",
+                "cvss_score": None,
+                "severity":   "UNKNOWN",
                 "reason": (
                     "Agent made a security claim with insufficient evidence "
                     f"(evidence: '{evidence.strip()}')"
                 )
             }
 
+        # All checks passed — build verified response
+        cvss  = None
+        sev   = "N/A"
+        if cve_mentions:
+            last = lookup_cve(cve_mentions[-1])
+            cvss = last.get("cvss_score")
+            sev  = last.get("severity", "N/A")
+
         return {
-            "check":  "hallucination",
-            "result": "VERIFIED",
-            "owasp":  "LLM09",
+            "check":      "hallucination",
+            "result":     "VERIFIED",
+            "owasp":      "LLM09",
+            "cvss_score": cvss,
+            "severity":   sev,
             "reason": (
-                f"All CVEs verified ({len(cve_mentions)} checked). "
+                f"All CVEs verified live via NVD ({len(cve_mentions)} checked). "
                 "Evidence present and sufficient."
             )
         }
@@ -260,7 +304,6 @@ class GuardScanners:
         """CHECK 3 — Excessive Agency (LLM08)"""
         allowed = AGENT_PERMISSIONS.get(agent_id, [])
 
-        # Unknown agent — zero trust policy
         if not allowed:
             return {
                 "check":  "permissions",
@@ -272,7 +315,6 @@ class GuardScanners:
                 )
             }
 
-        # Known agent but action outside permitted scope
         if action not in allowed:
             return {
                 "check":  "permissions",
