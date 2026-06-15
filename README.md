@@ -52,7 +52,7 @@ Splunk HEC · port 8088  →  index=main  sourcetype=sentinelguard
         |
         | | spath | eval | stats
         v
-Dashboard Studio · 13 panels
+Dashboard Studio · 10 panels
 
 MCP Server · port 8002 (FastMCP)
         |--- check_decision
@@ -70,7 +70,7 @@ MCP Server · port 8002 (FastMCP)
 | Index | `index=main sourcetype=sentinelguard` |
 | Field extraction | `\| spath` — nested JSON sub-objects for injection / hallucination / permissions |
 | SPL pattern | `\| spath \| eval \| stats count(eval(...))` — counts each check independently |
-| Dashboard | Dashboard Studio, 13 panels — verdict timeline, OWASP bar chart, MITRE heatmap, agent activity |
+| Dashboard | Dashboard Studio, 10 panels — verdict timeline, OWASP bar chart, MITRE heatmap, agent activity |
 
 ---
 
