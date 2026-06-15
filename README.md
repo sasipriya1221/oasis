@@ -1,184 +1,118 @@
-# Oasis 🛡️
+# Oasis
 
 **One agent protects. One agent explains.**
 
-Oasis is a Splunk-native agentic security system built for the Splunk Agentic Ops Hackathon 2026. It deploys two AI agents that work together to secure and explain every action taken inside a Splunk environment.
-
-- **Aegis Guard** — intercepts every AI agent action before execution, running three OWASP LLM Top 10 security checks in under 200ms
-- **Aegis Lens** — reads Splunk logs and explains every detected threat in plain English for SOC analysts, powered by Splunk's Foundation-sec AI model
+Oasis is a runtime security gateway for AI agents built for the **Splunk Agentic Ops Hackathon 2026**. It intercepts every agent action before execution, runs three parallel OWASP LLM Top 10 checks, logs structured verdicts to Splunk, and exposes those checks as MCP tools so any LLM can query them directly.
 
 ---
 
-## What it does
+## The problem
 
-AI agents are being deployed inside enterprise Splunk environments to automate security responses, run SPL searches, and execute remediation playbooks. These agents are powerful — and completely ungoverned.
+AI agents running inside enterprise environments — issuing alerts, isolating hosts, flagging vulnerabilities — have no runtime guardrail layer. An agent can be injected with malicious instructions, act on a CVE that doesn't exist, or attempt an action it was never authorized to perform. None of this shows up in your SIEM until after the damage is done.
 
-Oasis sits between every AI agent and your Splunk infrastructure. Before any agent action executes, Oasis checks:
+Oasis puts a security checkpoint in front of every agent action, before it executes.
 
-1. **LLM01 — Prompt injection** — was the agent secretly given malicious instructions?
-2. **LLM09 — Hallucinated CVEs** — is the agent acting on a fake vulnerability with a live NIST NVD lookup?
-3. **LLM08 — Permission violations** — does the agent have the right to do what it's trying to do?
+---
 
-Every blocked event is tagged with a MITRE ATT&CK technique ID and explained in plain English by Splunk's Foundation-sec AI model. SOC analysts see everything in a real-time Dashboard Studio interface.
+## How it works
+
+Every request hits the Oasis gateway on port 8001. Three checks run in parallel:
+
+**Check 1 — Prompt Injection (OWASP LLM01)**
+Four-layer pattern match: direct phrases, privilege escalation, roleplay/jailbreak, and context hijacking. Obfuscation detection strips whitespace before matching. Tagged to MITRE ATT&CK on block.
+
+**Check 2 — Hallucination Detection (OWASP LLM09)**
+Extracts every `CVE-XXXX-XXXXX` pattern from the agent's text and queries the NIST NVD API live. A CVE that doesn't exist in the NVD database gets the request flagged immediately. Results are cached for one hour to avoid rate limits.
+
+**Check 3 — Permission Enforcement (OWASP LLM08)**
+Zero-trust allowlist. Every registered agent has a fixed list of permitted actions. Unknown agents are blocked automatically. Any action outside the declared scope is rejected with the reason logged.
+
+The gateway returns a `BLOCKED` or `APPROVED` verdict plus the full check results, then ships the structured JSON event to Splunk via HEC.
 
 ---
 
 ## Architecture
 
-```
-AI Agent / MCP Client
-        ↓
-Oasis Gateway (FastAPI · Port 8001)
-        ↓
-┌─────────────────────────────────────┐
-│  Aegis Guard — 3 Security Scanners  │
-│  LLM01 · LLM09 + NVD API · LLM08   │
-│  MITRE ATT&CK Tagger · CVSS Scorer  │
-└─────────────────────────────────────┘
-        ↓
-Splunk HEC (Port 8088) → index=main
-        ↓
-┌─────────────────────────────────────┐
-│  Aegis Lens — Foundation-sec AI     │
-│  Plain-English threat explanations  │
-│  Dashboard Studio · 13 panels       │
-└─────────────────────────────────────┘
-        ↓
-SOC Analyst Dashboard
+See [`architecture.png`](architecture.png) in this repo for the full diagram.
 
-MCP Server (Port 8002) ← External AI agents
+```
+AI Agents (ThreatHunter-v2, NetMonitor-v1, LogAnalyser-v1 ...)
+        |
+        | POST /check_decision
+        v
+Oasis Gateway — FastAPI · port 8001
+        |
+        |--- [LLM01] Injection Scanner      (4 layers, obfuscation-aware)
+        |--- [LLM09] Hallucination Detector (live NVD API · 1hr cache)
+        |--- [LLM08] Permissions Enforcer   (zero-trust allowlist)
+        |
+        | BLOCKED / APPROVED + MITRE tag
+        v
+Splunk HEC · port 8088  →  index=main  sourcetype=sentinelguard
+        |
+        | | spath | eval | stats
+        v
+Dashboard Studio · 13 panels
+
+MCP Server · port 8002 (FastMCP)
+        |--- check_decision
+        |--- explain_threat
+        |--- get_threat_summary
 ```
 
 ---
 
-## Tech stack
+## Splunk integration
 
-| Layer | Technology |
-|-------|-----------|
-| Gateway | Python 3.12, FastAPI, Uvicorn |
-| Security checks | Custom scanners — LLM01, LLM08, LLM09 |
-| Threat intelligence | NIST NVD CVE API 2.0 (live, no auth) |
-| MITRE mapping | ATT&CK technique JSON (local) |
-| MCP server | FastMCP — exposes 3 tools to any MCP client |
-| Data platform | Splunk Enterprise 10.4 |
-| Ingestion | Splunk HEC port 8088 |
-| AI model | Foundation-sec-1.1-8b-instruct (Splunk hosted) |
-| Dashboard | Splunk Dashboard Studio |
-| Alerting | Splunk Alert actions → HITL queue |
+| What | How |
+|---|---|
+| Ingestion | Splunk HEC `POST :8088/services/collector/event` |
+| Index | `index=main sourcetype=sentinelguard` |
+| Field extraction | `\| spath` — nested JSON sub-objects for injection / hallucination / permissions |
+| SPL pattern | `\| spath \| eval \| stats count(eval(...))` — counts each check independently |
+| Dashboard | Dashboard Studio, 13 panels — verdict timeline, OWASP bar chart, MITRE heatmap, agent activity |
 
 ---
 
 ## OWASP LLM Top 10 coverage
 
-| OWASP ID | Threat | Oasis check |
-|----------|--------|-------------|
-| LLM01 | Prompt Injection | 4-layer regex + semantic pattern detection |
-| LLM08 | Excessive Agency | Role-based permission enforcement matrix |
-| LLM09 | Misinformation / Hallucination | Live NIST NVD CVE lookup — rejects fabricated CVE IDs |
+| OWASP ID | Category | Implementation |
+|---|---|---|
+| LLM01 | Prompt Injection | 36 phrases across 4 detection layers — direct, privilege escalation, roleplay, context hijack |
+| LLM08 | Excessive Agency | Zero-trust permission registry — 8 registered agents, each with a fixed action allowlist |
+| LLM09 | Misinformation / Hallucination | Live NIST NVD API lookup per CVE mention — rejects any CVE not found in the database |
 
 ---
 
 ## MITRE ATT&CK mappings
 
-| Threat type | Technique ID | Name |
-|-------------|-------------|------|
+Every blocked or flagged result carries a MITRE technique tag from `mitre_mappings.json`:
+
+| Threat | Technique | Name |
+|---|---|---|
 | Prompt injection | T1190 | Exploit Public-Facing Application |
-| Privilege escalation | T1078 | Valid Accounts |
-| Data exfiltration | T1041 | Exfiltration Over C2 Channel |
-| CVE hallucination | T1589.002 | Gather Victim Host Info |
+| Privilege escalation | T1078 | Valid Accounts / Privilege Abuse |
+| Roleplay injection | T1059 | Command and Scripting Interpreter |
+| Context hijacking | T1036 | Masquerading / Context Manipulation |
+| Obfuscated injection | T1027 | Obfuscated Files or Information |
+| CVE hallucination | T1589 | Gather Victim Identity Information |
+| No evidence claim | T1562 | Impair Defenses / Evidence Suppression |
 | Permission abuse | T1068 | Exploitation for Privilege Escalation |
-| Instruction override | T1195 | Supply Chain Compromise |
-| Jailbreak attempt | T1059 | Command and Scripting Interpreter |
-
----
-
-## Prerequisites
-
-- Python 3.12+
-- Splunk Enterprise 10.4 running on `localhost:8000`
-- Splunk HEC enabled on port 8088
-- Splunk AI Toolkit 5.6.4+ installed from Splunkbase
-- Foundation-sec connection configured in AI Toolkit (name: `sg_foundation_sec`)
-
----
-
-## Installation
-
-**1. Clone the repo**
-
-```bash
-git clone https://github.com/sasipriya1221/oasis.git
-cd oasis
-```
-
-**2. Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**3. Configure environment**
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set your Splunk HEC token:
-
-```
-SPLUNK_HOST=localhost
-SPLUNK_HEC_PORT=8088
-SPLUNK_HEC_TOKEN=your-actual-hec-token
-SPLUNK_INDEX=main
-SPLUNK_SOURCETYPE=sentinelguard
-```
-
-**4. Splunk setup**
-
-- Enable HEC: Settings → Data Inputs → HTTP Event Collector → Enable
-- Create a HEC token with index=main
-- Install AI Toolkit 5.6.4 from Splunkbase
-- In AI Toolkit → Connection Management → Add Connection → Splunk Hosted Models → `foundation-sec-1.1-8b-instruct` → name it `sg_foundation_sec`
-
----
-
-## Running Oasis
-
-Open three PowerShell terminals in the `sg1` folder.
-
-**Terminal 1 — Start the gateway**
-
-```bash
-uvicorn main:app --reload --port 8001
-```
-
-**Terminal 2 — Run attack simulations**
-
-```bash
-python simulate_attacks.py
-```
-
-**Terminal 3 — Start the MCP server**
-
-```bash
-python mcp_server.py
-```
+| Unknown agent | T1078 | Valid Accounts / Rogue Agent |
 
 ---
 
 ## MCP tools
 
-Oasis exposes three MCP tools on port 8002. Any MCP-compatible AI client (Claude Desktop, Cursor, custom agents) can call these before taking any action:
+The MCP server runs on port 8002 (FastMCP, SSE transport). Any MCP-compatible client can call these three tools before taking an action:
 
 | Tool | What it does |
-|------|-------------|
-| `check_decision` | Run all 3 security checks on an agent action. Returns verdict, severity, MITRE technique. |
-| `explain_threat` | Generate a plain-English SOC analyst explanation for a blocked event. |
-| `get_threat_summary` | Get a summary of all threats detected in the last N hours. |
+|---|---|
+| `check_decision(agent_id, text, action, evidence)` | Runs all 3 checks, returns verdict + MITRE tag |
+| `explain_threat(threat_type, agent_id, detail)` | Plain-English explanation of a detected threat for SOC analysts |
+| `get_threat_summary()` | Blocked count, block rate, breakdown by check type, last 5 events |
 
-**Claude Desktop config** (`~/.config/claude/claude_desktop_config.json`):
+To use with Claude Desktop, add to `claude_desktop_config.json`:
 
 ```json
 {
@@ -192,62 +126,111 @@ Oasis exposes three MCP tools on port 8002. Any MCP-compatible AI client (Claude
 
 ---
 
-## Performance
+## Attack simulation
 
-Tested across 500 simulated attack requests:
+`simulate_attacks.py` covers 12 scenarios across all three check categories:
 
-| Metric | Result |
-|--------|--------|
-| Attack scenarios covered | 12 / 12 |
-| Mean detection latency | ~150ms |
-| False positives | 0 |
-| Verdicts: BLOCK / WARN / ALLOW | ~75% / ~15% / ~10% |
-
----
-
-## Splunk Dashboard
-
-Oasis includes a 13-panel Dashboard Studio interface split into three rows:
-
-- **Row 1 — Live overview:** Total requests, block rate %, critical event count, mean latency
-- **Row 2 — Threat intelligence:** MITRE ATT&CK heatmap, OWASP breakdown, live CVE feed (CVSS ≥ 7.0), threat timeline
-- **Row 3 — AI analyst tools:** Foundation-sec explanations, MCP agent call log, HITL approval queue, audit trail
+| Group | Scenarios | Expected |
+|---|---|---|
+| Normal traffic | 2 | APPROVED |
+| Injection — Layer A (direct) | 1 | BLOCKED LLM01 |
+| Injection — Layer B (privilege escalation) | 1 | BLOCKED LLM01 |
+| Injection — Layer C (roleplay / jailbreak) | 1 | BLOCKED LLM01 |
+| Injection — Layer D (context hijack) | 1 | BLOCKED LLM01 |
+| Hallucination — fake CVE | 2 | FLAGGED LLM09 |
+| Hallucination — no evidence | 1 | FLAGGED LLM09 |
+| Permission — wrong action | 1 | BLOCKED LLM08 |
+| Permission — unknown agent | 1 | BLOCKED LLM08 |
+| Permission — scope creep | 1 | BLOCKED LLM08 |
 
 ---
 
-## Hackathon tracks
+## Prerequisites
 
-This project targets five prize tracks in the Splunk Agentic Ops Hackathon 2026:
-
-| Track | How Oasis qualifies |
-|-------|-------------------|
-| Grand Prize | Spans Security + Platform + AI. Uses all three special Splunk capabilities. Solves a novel enterprise problem. |
-| Best of Security | OWASP LLM01/08/09 + MITRE ATT&CK + live NIST CVE intelligence + HITL SOC workflow |
-| Best Use of Splunk MCP Server | Exposes own MCP server (port 8002) + connects to Splunk MCP Server app bidirectionally |
-| Best Use of Splunk Hosted Models | Foundation-sec-1.1-8b-instruct via `\| ai` SPL command for live threat explanation |
-| Best Use of Splunk Developer Tools | Dashboard Studio (13 panels), custom SPL, Splunk Alerts, AI Toolkit, HEC |
+- Python 3.9+
+- Splunk Enterprise running on `localhost:8000`
+- HEC enabled on port 8088 with a token for `index=main`
 
 ---
 
-## Repo structure
+## Setup
+
+```bash
+git clone https://github.com/sasipriya1221/oasis.git
+cd oasis
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```
+SPLUNK_HOST=localhost
+SPLUNK_HEC_PORT=8088
+SPLUNK_HEC_TOKEN=your-hec-token-here
+SPLUNK_INDEX=main
+SPLUNK_SOURCETYPE=sentinelguard
+```
+
+**Splunk HEC setup:**
+Settings → Data Inputs → HTTP Event Collector → New Token → set index to `main` → copy token into `.env`
+
+---
+
+## Running
+
+Open three terminals in the project folder.
+
+```bash
+# Terminal 1 — gateway
+uvicorn main:app --reload --port 8001
+
+# Terminal 2 — MCP server
+python mcp_server.py
+
+# Terminal 3 — run attack simulations (generates Splunk data)
+python simulate_attacks.py
+```
+
+To verify Splunk connectivity before running:
+
+```bash
+python test_splunk.py
+```
+
+---
+
+## File structure
 
 ```
 oasis/
-├── README.md
-├── LICENSE
-├── .env.example
-├── .gitignore
-├── requirements.txt
-├── main.py              ← FastAPI gateway (port 8001)
-├── mcp_server.py        ← MCP server (port 8002)
-├── scanners.py          ← LLM01 + LLM09 + LLM08 scanners
-├── simulate_attacks.py  ← 12 attack scenarios
-├── test_splunk.py       ← Splunk connectivity test
-└── mitre_mappings.json  ← MITRE ATT&CK technique mappings
+├── main.py               — FastAPI gateway, HEC logging, verdict logic
+├── scanners.py           — LLM01 / LLM09 / LLM08 scanner classes
+├── mcp_server.py         — MCP server, 3 tools, SSE transport
+├── simulate_attacks.py   — 12 attack scenarios
+├── test_splunk.py        — HEC connectivity test
+├── mitre_mappings.json   — 9 MITRE ATT&CK technique entries
+├── architecture.png      — System architecture diagram
+├── .env.example          — Environment variable template
+├── requirements.txt      — Python dependencies
+└── LICENSE               — MIT
+```
+
+---
+
+## Dependencies
+
+```
+fastapi==0.111.0
+uvicorn==0.29.0
+pydantic==2.7.1
+requests==2.31.0
+httpx==0.28.1
+fastmcp==3.4.2
 ```
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE)
