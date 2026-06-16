@@ -1,5 +1,4 @@
 # Oasis
-
 **One agent protects. One agent explains.**
 
 Oasis is a runtime security gateway for AI agents built for the **Splunk Agentic Ops Hackathon 2026**. It intercepts every agent action before execution, runs three parallel OWASP LLM Top 10 checks, logs structured verdicts to Splunk, and exposes those checks as MCP tools so any LLM can query them directly.
@@ -10,7 +9,7 @@ Oasis is a runtime security gateway for AI agents built for the **Splunk Agentic
 
 AI agents running inside enterprise environments — issuing alerts, isolating hosts, flagging vulnerabilities — have no runtime guardrail layer. An agent can be injected with malicious instructions, act on a CVE that doesn't exist, or attempt an action it was never authorized to perform. None of this shows up in your SIEM until after the damage is done.
 
-Oasis puts a security checkpoint in front of every agent action, before it executes.
+Oasis puts a security checkpoint in front of every agent action, **before it executes**.
 
 ---
 
@@ -33,31 +32,80 @@ The gateway returns a `BLOCKED` or `APPROVED` verdict plus the full check result
 
 ## Architecture
 
-See [`architecture.png`](architecture.png) in this repo for the full diagram.
+![Architecture](architecture.png)
 
 ```
 AI Agents (ThreatHunter-v2, NetMonitor-v1, LogAnalyser-v1 ...)
         |
         | POST /check_decision
         v
-Oasis Gateway — FastAPI · port 8001
-        |
-        |--- [LLM01] Injection Scanner      (4 layers, obfuscation-aware)
-        |--- [LLM09] Hallucination Detector (live NVD API · 1hr cache)
-        |--- [LLM08] Permissions Enforcer   (zero-trust allowlist)
+┌──────────────────────────────────────────────────────────┐
+│          Oasis Gateway — FastAPI · port 8001             │
+│                                                          │
+│  Agent 1 — The Protector                                 │
+│  ├── [LLM01] Injection Scanner   (4 layers, obfuscation) │
+│  ├── [LLM09] Hallucination Det.  (live NVD API · 1h cache│
+│  └── [LLM08] Permissions Enforcer(zero-trust allowlist)  │
+└──────────────────────────────────────────────────────────┘
         |
         | BLOCKED / APPROVED + MITRE tag
-        v
-Splunk HEC · port 8088  →  index=main  sourcetype=sentinelguard
         |
-        | | spath | eval | stats
-        v
-Dashboard Studio · 10 panels
+        ├──→  Splunk HEC · port 8088  →  index=main  sourcetype=sentinelguard
+        │            |
+        │            └──→  Dashboard Studio · 10 panels
+        │
+        └──→  Oasis MCP Server · port 8002 (FastMCP + SSE)
+                  |
+                  ├── check_decision
+                  ├── explain_threat             ← Agent 2: The Explainer
+                  ├── get_threat_summary
+                  └── analyze_threat_with_splunk_ai
+                            |
+                            ↓  calls at runtime via splunk_mcp_client.py
+                  ┌─────────────────────────────────┐
+                  │  Splunk MCP Server · port 8089  │
+                  │  ├── generate_spl    (Splunk AI) │
+                  │  ├── ask_splunk_question (AI)    │
+                  │  └── search_splunk              │
+                  └─────────────────────────────────┘
+                            |
+                            ↓
+                  Splunk REST API → live index data
+```
 
-MCP Server · port 8002 (FastMCP)
-        |--- check_decision
-        |--- explain_threat
-        |--- get_threat_summary
+---
+
+## Splunk AI Integration (runtime)
+
+This is what makes Oasis use **Splunk AI at runtime**, satisfying the hackathon requirement.
+
+### Tools called at runtime via `splunk_mcp_client.py`
+
+| Splunk AI Tool | Called from | What it does |
+|---|---|---|
+| `generate_spl` | `explain_threat`, `analyze_threat_with_splunk_ai` | Converts a natural-language threat description into SPL using Splunk AI |
+| `ask_splunk_question` | `explain_threat`, `analyze_threat_with_splunk_ai` | Returns a plain-English explanation of threat patterns from live Splunk data |
+| `search_splunk` | `get_threat_summary`, `demo.py` | Runs SPL against the live index and returns results |
+
+### How it works (step by step)
+
+When `explain_threat(threat_type="prompt_injection", agent_id="ThreatHunter-v2")` is called:
+
+1. Oasis builds a natural-language prompt: *"Show me all prompt_injection events for agent ThreatHunter-v2 from index=main sourcetype=sentinelguard in the last 24 hours, grouped by MITRE technique"*
+2. Calls **`generate_spl`** on the Splunk MCP Server — Splunk AI returns an SPL string
+3. Executes that AI-generated SPL against Splunk REST API
+4. Calls **`ask_splunk_question`** — Splunk AI returns a plain-English explanation of the findings
+5. Returns the AI-generated SPL, search results, and AI explanation to the calling agent
+
+### Installing Splunk MCP Server
+
+```bash
+cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/
+$SPLUNK_HOME/bin/splunk restart
+
+# Verify the MCP endpoint is live
+curl -k -H "Authorization: Bearer $SPLUNK_REST_TOKEN" \
+     https://localhost:8089/servicesNS/nobody/Splunk_MCP_Server/mcp/v1/tools/list
 ```
 
 ---
@@ -66,8 +114,8 @@ MCP Server · port 8002 (FastMCP)
 
 | What | How |
 |---|---|
-| Ingestion | Splunk HEC `POST :8088/services/collector/event` |
-| Index | `index=main sourcetype=sentinelguard` |
+| Ingestion | Splunk HEC POST `:8088/services/collector/event` |
+| Index | `index=main` `sourcetype=sentinelguard` |
 | Field extraction | `\| spath` — nested JSON sub-objects for injection / hallucination / permissions |
 | SPL pattern | `\| spath \| eval \| stats count(eval(...))` — counts each check independently |
 | Dashboard | Dashboard Studio, 10 panels — verdict timeline, OWASP bar chart, MITRE heatmap, agent activity |
@@ -104,13 +152,14 @@ Every blocked or flagged result carries a MITRE technique tag from `mitre_mappin
 
 ## MCP tools
 
-The MCP server runs on port 8002 (FastMCP, SSE transport). Any MCP-compatible client can call these three tools before taking an action:
+The MCP server runs on port 8002 (FastMCP, SSE transport). Any MCP-compatible client can call these four tools:
 
 | Tool | What it does |
 |---|---|
 | `check_decision(agent_id, text, action, evidence)` | Runs all 3 checks, returns verdict + MITRE tag |
-| `explain_threat(threat_type, agent_id, detail)` | Plain-English explanation of a detected threat for SOC analysts |
+| `explain_threat(threat_type, agent_id, detail)` | **Calls Splunk AI at runtime** — generates SPL, runs it, returns AI explanation |
 | `get_threat_summary()` | Blocked count, block rate, breakdown by check type, last 5 events |
+| `analyze_threat_with_splunk_ai(threat_type, agent_id, time_range)` | Explicit Splunk AI call — invokes `generate_spl` + `ask_splunk_question` at runtime |
 
 To use with Claude Desktop, add to `claude_desktop_config.json`:
 
@@ -150,6 +199,8 @@ To use with Claude Desktop, add to `claude_desktop_config.json`:
 - Python 3.9+
 - Splunk Enterprise running on `localhost:8000`
 - HEC enabled on port 8088 with a token for `index=main`
+- Splunk REST API accessible on port 8089
+- `Splunk_MCP_Server` app installed in `$SPLUNK_HOME/etc/apps/`
 
 ---
 
@@ -164,35 +215,46 @@ cp .env.example .env
 
 Edit `.env`:
 
-```
+```env
 SPLUNK_HOST=localhost
 SPLUNK_HEC_PORT=8088
 SPLUNK_HEC_TOKEN=your-hec-token-here
 SPLUNK_INDEX=main
 SPLUNK_SOURCETYPE=sentinelguard
+
+SPLUNK_REST_PORT=8089
+SPLUNK_REST_TOKEN=your-splunk-rest-bearer-token-here
 ```
 
-**Splunk HEC setup:**
-Settings → Data Inputs → HTTP Event Collector → New Token → set index to `main` → copy token into `.env`
+**Splunk HEC setup:** Settings → Data Inputs → HTTP Event Collector → New Token → set index to `main` → copy token into `.env`
+
+**Splunk REST token:** Settings → Tokens → New Token
+
+**Install Splunk MCP Server:**
+```bash
+cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/
+$SPLUNK_HOME/bin/splunk restart
+```
 
 ---
 
 ## Running
 
-Open three terminals in the project folder.
-
 ```bash
-# Terminal 1 — gateway
+# Terminal 1 — gateway (Agent 1: The Protector)
 uvicorn main:app --reload --port 8001
 
-# Terminal 2 — MCP server
+# Terminal 2 — MCP server (Agent 2: The Explainer)
 python mcp_server.py
 
-# Terminal 3 — run attack simulations (generates Splunk data)
+# Terminal 3 — populate Splunk with attack data
 python simulate_attacks.py
+
+# Terminal 4 — run the end-to-end demo
+python demo.py --agent ThreatHunter-v2
 ```
 
-To verify Splunk connectivity before running:
+Verify Splunk connectivity before running:
 
 ```bash
 python test_splunk.py
@@ -204,16 +266,18 @@ python test_splunk.py
 
 ```
 oasis/
-├── main.py               — FastAPI gateway, HEC logging, verdict logic
-├── scanners.py           — LLM01 / LLM09 / LLM08 scanner classes
-├── mcp_server.py         — MCP server, 3 tools, SSE transport
-├── simulate_attacks.py   — 12 attack scenarios
-├── test_splunk.py        — HEC connectivity test
-├── mitre_mappings.json   — 9 MITRE ATT&CK technique entries
-├── architecture.png      — System architecture diagram
-├── .env.example          — Environment variable template
-├── requirements.txt      — Python dependencies
-└── LICENSE               — MIT
+├── main.py                 — FastAPI gateway, HEC logging, verdict logic
+├── scanners.py             — LLM01 / LLM09 / LLM08 scanner classes
+├── mcp_server.py           — MCP server, 4 tools, Splunk AI integration
+├── splunk_mcp_client.py    — MCP client connecting to Splunk MCP Server
+├── demo.py                 — End-to-end demo, 5 labelled steps for judges
+├── simulate_attacks.py     — 12 attack scenarios
+├── test_splunk.py          — HEC + REST + MCP Server connectivity test
+├── mitre_mappings.json     — 9 MITRE ATT&CK technique entries
+├── architecture.png        — System architecture diagram
+├── .env.example            — Environment variable template
+├── requirements.txt        — Python dependencies
+└── LICENSE                 — MIT
 ```
 
 ---
@@ -227,10 +291,11 @@ pydantic==2.7.1
 requests==2.31.0
 httpx==0.28.1
 fastmcp==3.4.2
+python-dotenv==1.0.1
 ```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see LICENSE
