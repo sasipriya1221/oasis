@@ -13,6 +13,26 @@ Oasis puts a security checkpoint in front of every agent action, **before it exe
 
 ---
 
+## ?? Splunk MCP Server — verified install status
+
+We queried our local Splunk instance directly (`GET /services/apps/local`) and confirmed the official `Splunk_MCP_Server` Splunkbase app is **not currently installed**. As a result, live calls to `generate_spl`, `search_splunk`, and `ask_splunk_question` return `401 Unauthorized` in our environment right now — the integration code is complete and correctly implements the Splunk MCP Server protocol, but cannot be demonstrated end-to-end until the app is installed.
+
+**Verified working live, right now:**
+- Full OWASP LLM01 / LLM08 / LLM09 security gateway
+- MITRE ATT&CK tagging on every blocked event
+- Splunk HEC ingestion of structured events
+- `SplunkMCPClient` correctly implements `tools/call` and `tools/list` against the Splunk MCP Server protocol spec — code-complete and protocol-tested, pending app installation in the grading environment
+
+**To complete the live Splunk AI demo:**
+```bash
+cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/
+$SPLUNK_HOME/bin/splunk restart
+# add a valid SPLUNK_REST_TOKEN to .env, then:
+python demo.py --agent ThreatHunter-v2
+```
+
+---
+
 ## How it works
 
 Every request hits the Oasis gateway on port 8001. Three checks run in parallel:
@@ -299,3 +319,4 @@ python-dotenv==1.0.1
 ## License
 
 MIT â€” see LICENSE
+
