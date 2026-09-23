@@ -47,7 +47,16 @@ async def run_demo(agent_id: str):
         result = r.json()
     print(json.dumps(result, indent=2))
     assert result["status"] == "BLOCKED", "Expected BLOCKED — check scanners.py"
-    print(f"\n✅ Blocked. MITRE: {result.get('mitre_technique')} — {result.get('mitre_name')}")
+    blocked_checks = [
+        check for check in result.get("checks", [])
+        if check.get("result") in {"BLOCKED", "FLAGGED"}
+    ]
+    mitre_labels = ", ".join(
+        f"{check.get('mitre_technique')} - {check.get('mitre_name')}"
+        for check in blocked_checks
+        if check.get("mitre_technique") not in {None, "N/A"}
+    )
+    print(f"\n✅ Blocked. MITRE: {mitre_labels or 'N/A'}")
 
     # ── STEP 3: Agent 1 blocks a hallucinated CVE ─────────────────────────────
     banner(3, "Agent 1 — The Protector blocks a hallucinated CVE")
@@ -69,10 +78,10 @@ async def run_demo(agent_id: str):
         tools = await client.list_tools()
         for t in tools:
             print(f"  • {t.get('name')}: {t.get('description', '')[:70]}")
-        print(f"\n✅ Splunk MCP Server is live — {len(tools)} tools available")
+        print(f"\n✅ Splunk MCP Server is live — {len(tools)} tools available")\n        splunk_mcp_available = True
     except Exception as e:
         print(f"  [Splunk MCP Server error: {e}]")
-        print("  Install the app: cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/")
+        print("  External Splunk MCP integration unavailable. Check app installation and SPLUNK_REST_TOKEN.")
 
     # ── STEP 5: Agent 2 — Splunk AI pipeline live ─────────────────────────────
     banner(5, "Agent 2 — The Explainer calls Splunk AI at runtime")
