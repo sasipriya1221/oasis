@@ -78,7 +78,8 @@ async def run_demo(agent_id: str):
         tools = await client.list_tools()
         for t in tools:
             print(f"  • {t.get('name')}: {t.get('description', '')[:70]}")
-        print(f"\n✅ Splunk MCP Server is live — {len(tools)} tools available")\n        splunk_mcp_available = True
+        print(f"\n✅ Splunk MCP Server is live — {len(tools)} tools available")
+        splunk_mcp_available = True
     except Exception as e:
         print(f"  [Splunk MCP Server error: {e}]")
         print("  External Splunk MCP integration unavailable. Check app installation and SPLUNK_REST_TOKEN.")
@@ -122,8 +123,12 @@ async def run_demo(agent_id: str):
     print("  DEMO COMPLETE")
     print(f"{'='*60}")
     print("  Agent 1 (The Protector) — blocked threats in steps 2 & 3")
-    print("  Agent 2 (The Explainer) — called Splunk AI in steps 5a/5b/5c")
-    print("  Splunk AI tools used: generate_spl, search_splunk, ask_splunk_question")
+    if splunk_mcp_available:
+        print("  Agent 2 (The Explainer) — Splunk MCP connection verified")
+        print("  Splunk AI tools invoked: generate_spl, search_splunk, ask_splunk_question")
+    else:
+        print("  Agent 2 (The Explainer) — local Lens server can remain online")
+        print("  External Splunk AI calls were attempted but not authenticated (HTTP 401)")
 
 
 if __name__ == "__main__":
