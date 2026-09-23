@@ -31,7 +31,7 @@ async def run_demo(agent_id: str):
     # ── STEP 1: Health check ──────────────────────────────────────────────────
     banner(1, "Gateway Health Check")
     async with httpx.AsyncClient(timeout=5) as h:
-        r = await h.get(f"{GATEWAY_URL}/")
+        r = await h.get(f"{GATEWAY_URL}/health")
         print(json.dumps(r.json(), indent=2))
 
     # ── STEP 2: Agent 1 blocks a prompt injection ─────────────────────────────
