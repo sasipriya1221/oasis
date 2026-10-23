@@ -1,3 +1,7 @@
+<a href="https://github.com/sasipriya1221"><img src=".github/episode.svg" width="100%" alt="Episode 02, Oasis. The threat: a poisoned alert. The defence: blocked by three checks, tagged MITRE ATT&CK T1190."></a>
+
+<p align="center"><a href="https://github.com/sasipriya1221">◀ Back to the teaser</a> &nbsp;·&nbsp; <b>Episode 02 of 07</b> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app/oasis-live.html">Try the live demo</a> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app">Watch the trailer ▶</a></p>
+
 # Oasis
 **One agent protects. One agent explains.**
 
@@ -10,26 +14,6 @@ Oasis is a runtime security gateway for AI agents built for the **Splunk Agentic
 AI agents running inside enterprise environments — issuing alerts, isolating hosts, flagging vulnerabilities — have no runtime guardrail layer. An agent can be injected with malicious instructions, act on a CVE that doesn't exist, or attempt an action it was never authorized to perform. None of this shows up in your SIEM until after the damage is done.
 
 Oasis puts a security checkpoint in front of every agent action, **before it executes**.
-
----
-
-## ?? Splunk MCP Server � verified install status
-
-We queried our local Splunk instance directly (`GET /services/apps/local`) and confirmed the official `Splunk_MCP_Server` Splunkbase app is **not currently installed**. As a result, live calls to `generate_spl`, `search_splunk`, and `ask_splunk_question` return `401 Unauthorized` in our environment right now � the integration code is complete and correctly implements the Splunk MCP Server protocol, but cannot be demonstrated end-to-end until the app is installed.
-
-**Verified working live, right now:**
-- Full OWASP LLM01 / LLM08 / LLM09 security gateway
-- MITRE ATT&CK tagging on every blocked event
-- Splunk HEC ingestion of structured events
-- `SplunkMCPClient` correctly implements `tools/call` and `tools/list` against the Splunk MCP Server protocol spec � code-complete and protocol-tested, pending app installation in the grading environment
-
-**To complete the live Splunk AI demo:**
-```bash
-cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/
-$SPLUNK_HOME/bin/splunk restart
-# add a valid SPLUNK_REST_TOKEN to .env, then:
-python demo.py --agent ThreatHunter-v2
-```
 
 ---
 
@@ -312,6 +296,26 @@ requests==2.31.0
 httpx==0.28.1
 fastmcp==3.4.2
 python-dotenv==1.0.1
+```
+
+---
+
+## Status: Splunk MCP Server install
+
+We queried our local Splunk instance directly (`GET /services/apps/local`) and confirmed the official `Splunk_MCP_Server` Splunkbase app is **not currently installed**. As a result, live calls to `generate_spl`, `search_splunk`, and `ask_splunk_question` return `401 Unauthorized` in our environment right now — the integration code is complete and correctly implements the Splunk MCP Server protocol, but cannot be demonstrated end-to-end until the app is installed.
+
+**Verified working live, right now:**
+- Full OWASP LLM01 / LLM08 / LLM09 security gateway
+- MITRE ATT&CK tagging on every blocked event
+- Splunk HEC ingestion of structured events
+- `SplunkMCPClient` correctly implements `tools/call` and `tools/list` against the Splunk MCP Server protocol spec — code-complete and protocol-tested, pending app installation in the grading environment
+
+**To complete the live Splunk AI demo:**
+```bash
+cp -r Splunk_MCP_Server $SPLUNK_HOME/etc/apps/
+$SPLUNK_HOME/bin/splunk restart
+# add a valid SPLUNK_REST_TOKEN to .env, then:
+python demo.py --agent ThreatHunter-v2
 ```
 
 ---
