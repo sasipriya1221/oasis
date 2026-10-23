@@ -1,6 +1,6 @@
 <a href="https://github.com/sasipriya1221"><img src=".github/episode.svg" width="100%" alt="Episode 02, Oasis. The threat: a poisoned alert. The defence: blocked by three checks, tagged MITRE ATT&CK T1190."></a>
 
-<p align="center"><a href="https://github.com/sasipriya1221">◀ Back to the teaser</a> &nbsp;·&nbsp; <b>Episode 02 of 07</b> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app/oasis-live.html">Try the live demo</a> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app">Watch the trailer ▶</a></p>
+<p align="center"><a href="https://github.com/sasipriya1221">◀ Sasipriya Kalimuthu</a> &nbsp;·&nbsp; <b>Episode 02 of 07</b> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app/oasis-live.html">Try the live demo</a> &nbsp;·&nbsp; <a href="https://sasipriya-kalimuthu.vercel.app">Portfolio ▶</a></p>
 
 # Oasis
 **One agent protects. One agent explains.**
